@@ -7,6 +7,8 @@
 	<script src="https://unpkg.com/@tonejs/midi"></script>
 	<script src='https://surikov.github.io/webaudiofont/npm/dist/WebAudioFontPlayer.js'></script>
 	<script src='https://surikov.github.io/webaudiofontdata/sound/0000_JCLive_sf2_file.js'></script>
+	<!-- <script src='https://surikov.github.io/webaudiofontdata/sound/0290_SBLive_sf2.js'></script> -->
+
 	<style>
 		.score {display: flex; flex-direction: column; align-items: center;}
 		#header {height: 40px; display: flex; flex-direction: column; justify-content: space-between; width: 595px;  align-items: center; }
@@ -44,14 +46,14 @@
 		const AudioContext = window.AudioContext || window.webkitAudioContext;
 		let audioContext = new AudioContext();
 		const player = new WebAudioFontPlayer();
-		let reverberator, compressor, offlineCtx;
+		let reverberator, compressor, offlineCtx, renderedBuffer, songBuffer;
 
 		function setupOfflineCtx(offlineCtx) {
 			reverberator = player.createReverberator(offlineCtx);
 			compressor = offlineCtx.createDynamicsCompressor();
 			compressor.threshold.setValueAtTime(-50, offlineCtx.currentTime);
 			compressor.ratio.setValueAtTime(20, offlineCtx.currentTime);
-			reverberator.connect(compressor).connect(offlineCtx.destination);
+			reverberator.output.connect(compressor).connect(offlineCtx.destination);
 		}
 
 		function convertDataURIToBinary(base64) {
@@ -64,29 +66,22 @@
 			return array;
 		}
 
-		var ahdsr= [{
-				duration: 0,
-				volume: 0.4
-		}, {
-				duration: 0.2,
-				volume: 1
-		}, {
-				duration: 0.3,
-				volume: 0.5
-		}, {
-				duration: 0.3,
-				volume: 0
-		}];
-
 		function play_midi() {
-			if (!song)  return;
+			console.log(renderedBuffer)
+			if (!renderedBuffer)  return;
 			if (isPlaying == false) {
 				isPlaying = true;
 				$("#play").html("<i class=\"fas fa-stop\"></i>");
-
+				console.log('!!!!')
+				songBuffer = audioContext.createBufferSource();
+				songBuffer.buffer = renderedBuffer;
+				songBuffer.connect(audioContext.destination);
+				songBuffer.start();
 			} else {
 				isPlaying = false;
 				$("#play").html("<i class=\"fas fa-play\"></i>");
+				songBuffer.stop();
+				songBuffer.disconnect();
 			}
 		}
 
@@ -101,14 +96,27 @@
 				let binary = convertDataURIToBinary(base64midi);
 				song = new Midi(binary);
 				let offlineCtx = new OfflineAudioContext(2, 44100*song.duration, 44100);
+				setupOfflineCtx(offlineCtx);
 				song.tracks.forEach(t => {
 					let preset = t.instrument.percussion? player.loader.drumInfo(t.instrument.number) : player.loader.instrumentInfo(t.instrument.number);
+					console.log(preset)
 					player.loader.decodeAfterLoading(offlineCtx, preset.variable);
-					t.notes.forEach(n => {
-						player.queueWaveTable(offlineCtx, reverberator, window[preset.variable], n.time, n.midi, n.duration, n.velocity);
-					})
-
 				})
+				setTimeout(() => {
+					song.tracks.forEach(t => {
+						let channel = player.createChannel(offlineCtx);
+						console.log(channel)
+						channel.output.connect(reverberator.input);
+						let preset = t.instrument.percussion? player.loader.drumInfo(t.instrument.number) : player.loader.instrumentInfo(t.instrument.number);
+						t.notes.forEach(n => {
+							player.queueWaveTable(offlineCtx, channel.input, window[preset.variable], n.time, n.midi, n.duration, n.velocity);
+						})
+					})
+					offlineCtx.startRendering().then(buffer => {
+						renderedBuffer = buffer;
+						console.log(renderedBuffer)
+					})
+				}, 100)
 			}
 		});
 	</script>
