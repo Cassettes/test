@@ -6,16 +6,24 @@
 	<script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.13.1/js/all.min.js" type="text/javascript"></script>
 	<script src="https://unpkg.com/@tonejs/midi"></script>
 	<script src='https://surikov.github.io/webaudiofont/npm/dist/WebAudioFontPlayer.js'></script>
-	<script src='https://surikov.github.io/webaudiofontdata/sound/0000_JCLive_sf2_file.js'></script>
+	<!-- <script src='https://surikov.github.io/webaudiofontdata/sound/0000_JCLive_sf2_file.js'></script> -->
 	<!-- <script src='https://surikov.github.io/webaudiofontdata/sound/0290_SBLive_sf2.js'></script> -->
+	<script src="svg2pdf.js" type="text/javascript"></script>
+	<script src="blob-stream.js" type="text/javascript"></script>
+	<script src="pdfkit.js" type="text/javascript"></script>
+	<script src="vrvTTF.js" type="text/javascript"></script>
 
 	<style>
 		.score {display: flex; flex-direction: column; align-items: center;}
 		#header {height: 40px; display: flex; flex-direction: column; justify-content: space-between; width: 595px;  align-items: center; }
 		.toolbar {width: 100%; display: flex; flex-direction: row; justify-content: space-between; align-items: center; flex: 1;}
-		.toolbar > div {padding: 0 10px; color: #555; cursor: pointer;}
-		.toolbar > div:hover {color: black;}
+		.toolbar > div {padding: 0 10px; color: #555;}
+		.toolbar > div:not(#page):hover {color: black; cursor: pointer;}
+		#page {display: flex; flex-direction: row; justify-content: space-between; width: 50px;}
+		#page > span {font-family: monospace;}
+		.page:hover {color: black; cursor: pointer;}
 		#progress {height: 2px;}
+		#play {flex: 1;}
 		#svg_output > svg {width: 595px; height: 842px; box-shadow: 0 0 10px rgba(0,0,0,.1);}
 	</style>
 </head>
@@ -26,9 +34,14 @@
 			<div class="toolbar">
 				<div id="play" onclick="play_midi()"><i class="fas fa-play"></i></div>
 				<div id="time"></div>
-				<div id="transpose"><i class="fas fa-key"></i></div>
-				<div id="download"><i class="fas fa-download"></i></div>
-				<div id="enlarge"><i class="fas fa-expand"></i></div>
+				<div id="page">
+					<i class="page fas fa-angle-left" onclick="turnLeft()"></i>
+					<span id="page_number"></span>
+					<i class="page fas fa-angle-right" onclick="turnRight()"></i>
+				</div>
+				<!-- <div id="transpose"><i class="fas fa-key"></i></div> -->
+				<div id="download" onclick="generate_pdf()"><i class="fas fa-download"></i></div>
+				<!-- <div id="enlarge"><i class="fas fa-expand"></i></div> -->
 			</div>
 			<div id="progress">
 			</div>
@@ -40,20 +53,103 @@
 		const url2 = "https://notation-1259785823.cos.ap-chengdu.myqcloud.com/sample-encodings-master/MEI_3.0/Music/Complete_examples/Ahle_Jesu_meines_Herzens_Freud.mei";
 		const xml1 = "https://notation-1259785823.cos.ap-chengdu.myqcloud.com/20161117%E6%B5%8B%E8%AF%95%E6%96%87%E4%BB%B6/%E4%B9%85%E7%9F%B3%E8%AE%A9/52%20%E6%82%AC%E5%B4%96%E4%B8%8A%E7%9A%84%E9%87%91%E9%B1%BC%E5%A7%AC.xml";
 		const xml2 = "https://notation-1259785823.cos.ap-chengdu.myqcloud.com/20161117%E6%B5%8B%E8%AF%95%E6%96%87%E4%BB%B6/%E4%B9%85%E7%9F%B3%E8%AE%A9/10%20La%20Pioggia.xml";
+		const xml3 = "https://notation-1259785823.cos.ap-chengdu.myqcloud.com/20161117%E6%B5%8B%E8%AF%95%E6%96%87%E4%BB%B6/%E4%B8%AD%E5%A4%AE%E9%9F%B3%E4%B9%90%E5%AD%A6%E9%99%A2%E8%80%83%E7%BA%A7/06%E5%85%AD%E7%BA%A710G%E5%A4%A7%E8%B0%83%E5%A5%8F%E9%B8%A3%E6%9B%B2.xml"
+		const xml4 = "https://notation-1259785823.cos.ap-chengdu.myqcloud.com/xmlsamples/MozartTrio.musicxml";
+		const xml5 = "https://notation-1259785823.cos.ap-chengdu.myqcloud.com/xmlsamples/Echigo-Jishi.musicxml";
+		const xml6 = "https://notation-1259785823.cos.ap-chengdu.myqcloud.com/xmlsamples/Dichterliebe01.musicxml";
 
 		let isPlaying = false;
 		let song = null;
 		const AudioContext = window.AudioContext || window.webkitAudioContext;
 		let audioContext = new AudioContext();
 		const player = new WebAudioFontPlayer();
-		let reverberator, compressor, offlineCtx, renderedBuffer, songBuffer;
+		let currPage = 1;
+		let ids = [];
+		let reverberator, compressor, fontLoaded, page, numPages, svg, midiInterval, outputFilename;
 
-		function setupOfflineCtx(offlineCtx) {
-			reverberator = player.createReverberator(offlineCtx);
-			compressor = offlineCtx.createDynamicsCompressor();
-			compressor.threshold.setValueAtTime(-50, offlineCtx.currentTime);
-			compressor.ratio.setValueAtTime(20, offlineCtx.currentTime);
-			reverberator.output.connect(compressor).connect(offlineCtx.destination);
+		function setupEffects(audioCtx) {
+			reverberator = player.createReverberator(audioCtx);
+			compressor = audioCtx.createDynamicsCompressor();
+			compressor.threshold.setValueAtTime(-50, audioCtx.currentTime);
+			compressor.ratio.setValueAtTime(20, audioCtx.currentTime);
+			reverberator.output.connect(compressor).connect(audioCtx.destination);
+		}
+
+		function saveAs(blob, fileName) {
+			let a = document.createElement("a");
+			a.href = URL.createObjectURL(blob);
+			a.download = fileName;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+		}
+
+		async function generate_pdf() {
+				// var pdfFormat = $("#pdfFormat").val();
+				var pdfFormat = "A4";
+				var pdfSize = [2100, 2970];
+				// if (pdfFormat == "letter") pdfSize = [2159, 2794];
+				// else if (pdfFormat == "B4") pdfSize = [2500, 3530];
+
+				// var pdfOrientation = $("#pdfOrientation").val();
+				var pdfOrientation = 'portrait';
+				var pdfLandscape = pdfOrientation == 'landscape';
+				var pdfHeight = pdfLandscape ? pdfSize[0] : pdfSize[1];
+				var pdfWidth = pdfLandscape ? pdfSize[1] : pdfSize[0];
+
+				var fontCallback = function(family, bold, italic, fontOptions) {
+					if (family === "VerovioText") {
+						return family;
+					}
+					// return 'ch';
+					if (family.match(/(?:^|,)\s*sans-serif\s*$/) || true) {
+						if (bold && italic) {return 'Times-BoldItalic';}
+						if (bold && !italic) {return 'Times-Bold';}
+						if (!bold && italic) {return 'Times-Italic';}
+						if (!bold && !italic) {return 'Times-Roman';}
+					}
+				};
+
+				var options = {};
+				options.fontCallback = fontCallback;
+
+				var doc = new PDFDocument({useCSS: true, compress: true, autoFirstPage: false, layout: pdfOrientation});
+				var stream = doc.pipe(blobStream());
+
+				stream.on('finish', function() {
+					var blob = stream.toBlob('application/pdf');
+					var pdfFilename = outputFilename.replace(/\.[^\.]+$/, '.pdf');
+					saveAs(blob, pdfFilename);
+				});
+
+				var buffer = Uint8Array.from(atob(vrvTTF), c => c.charCodeAt(0));
+				doc.registerFont('VerovioText',buffer);
+				// var ckj = await fetch('https://notation-1259785823.cos.ap-chengdu.myqcloud.com/HuaWenXiHei-1.ttf');
+				// var ckjBuffer = await ckj.arrayBuffer();
+				// doc.registerFont('ch', ckjBuffer);
+
+				pdfOptions = {
+					adjustPageHeight: false,
+					breaks: "auto",
+					mmOutput: true,
+					// footer: "auto",
+					pageHeight: pdfHeight,
+					pageWidth: pdfWidth,
+					scale: 100
+				}
+
+				vrvToolkit.setOptions(pdfOptions);
+				vrvToolkit.redoLayout();
+				for (i = 0; i < vrvToolkit.getPageCount(); i++) {
+					doc.addPage({size: pdfFormat, layout: pdfOrientation});
+					SVGtoPDF(doc, vrvToolkit.renderToSVG(i + 1, {}), 0, 0, options);
+				}
+
+				// Reset the options
+				// set_options();
+				vrvToolkit.redoLayout();
+
+				doc.end();
 		}
 
 		function convertDataURIToBinary(base64) {
@@ -66,57 +162,123 @@
 			return array;
 		}
 
-		function play_midi() {
-			console.log(renderedBuffer)
-			if (!renderedBuffer)  return;
-			if (isPlaying == false) {
-				isPlaying = true;
-				$("#play").html("<i class=\"fas fa-stop\"></i>");
-				console.log('!!!!')
-				songBuffer = audioContext.createBufferSource();
-				songBuffer.buffer = renderedBuffer;
-				songBuffer.connect(audioContext.destination);
-				songBuffer.start();
-			} else {
-				isPlaying = false;
-				$("#play").html("<i class=\"fas fa-play\"></i>");
-				songBuffer.stop();
-				songBuffer.disconnect();
+		function midiUpdate(time) {
+			let elemsAtTime = vrvToolkit.getElementsAtTime(time);
+			if (elemsAtTime.page > 0) {
+				if (elemsAtTime.page !== currPage) {
+					currPage = elemsAtTime.page;
+					svg = vrvToolkit.renderToSVG(currPage, {});
+					$("#svg_output").html(svg);
+					$("#page_number").html(currPage);
+				}
+				if ((elemsAtTime.notes.length > 0) && (ids != elemsAtTime.notes)) {
+						ids.forEach(function(noteid) {
+							if ($.inArray(noteid, elemsAtTime.notes) == -1) {
+								$("#" + noteid).attr("fill", "#000").attr("stroke", "#000");
+							}
+						});
+						ids = elemsAtTime.notes;
+						ids.forEach(function(noteid) {
+							if ($.inArray(noteid, elemsAtTime.notes) != -1) {
+								$("#" + noteid).attr("fill", "#c00").attr("stroke", "#c00");;
+							}
+						});
+					}
 			}
 		}
 
+		function midiStop() {
+			console.log('!!!')
+			isPlaying = false;
+			$("#play").html("<i class=\"fas fa-play\"></i>");
+			player.cancelQueue(audioContext);
+			if (midiInterval) {
+				clearInterval(midiInterval);
+			}
+			ids.forEach(function(noteid) {
+				$("#" + noteid).attr("fill", "#000").attr("stroke", "#000");
+			});
+
+		}
+
+		function play_midi() {
+			if (!fontLoaded)  return;
+			if (isPlaying == false) {
+				isPlaying = true;
+				$("#play").html("<i class=\"fas fa-stop\"></i>");
+				let refStart = Date.now();
+				song.tracks.forEach(t => {
+					let channel = player.createChannel(audioContext);
+					channel.output.connect(reverberator.input);
+					let preset = t.instrument.percussion? player.loader.drumInfo(t.instrument.number) : player.loader.instrumentInfo(t.instrument.number);
+					t.notes.forEach(n => {
+						player.queueWaveTable(audioContext, channel.input, window[preset.variable], n.time, n.midi, n.duration, n.velocity);
+					})
+				})
+				midiInterval = setInterval(() => {
+					let sec = (Date.now()-refStart);
+					midiUpdate(sec);
+					if (sec >= song.duration*1000)	midiStop();
+				}, 100);
+			} else {
+				midiStop();
+			}
+		}
+
+		function loadAllFonts(audioCtx, tracks) {
+			let gotUrl = [];
+			Promise.all(tracks.map(t => {
+				return new Promise(resolve => {
+					let preset = t.instrument.percussion? player.loader.drumInfo(t.instrument.number) : player.loader.instrumentInfo(t.instrument.number);
+					if (gotUrl.includes(preset.url)) resolve(true);
+					player.loader.startLoad(audioCtx, preset.url, preset.variable);
+					gotUrl.push(preset.url)
+					player.loader.waitLoad(() => {
+						player.cancelQueue(audioCtx);
+						resolve(true);
+					})
+				})
+			})).then(res => {
+				fontLoaded = true;
+				console.log(res)
+			})
+		}
+
+		function turnLeft() {
+			if (!svg)	return;
+			if (currPage <= 1) return;
+			currPage--;
+			svg = vrvToolkit.renderToSVG(currPage, {});
+			$("#svg_output").html(svg);
+			$("#page_number").html(currPage);
+		}
+
+		function turnRight() {
+			if (!svg)	return;
+			if (currPage >= numPages) return;
+			currPage++;
+			svg = vrvToolkit.renderToSVG(currPage, {});
+			$("#svg_output").html(svg);
+			$("#page_number").html(currPage);
+		}
+
 		let vrvToolkit = new verovio.toolkit();
+		let params = new URLSearchParams(location.search);
+		let file = params.get('file') || xml2;
 		$.ajax({
-			url: xml2,
+			url: file,
 			dataType: "text",
 			success: function(data) {
-				let svg = vrvToolkit.renderData(data, {});
+				outputFilename = decodeURI(file.replace(/^.*[\\\/]/, ''));
+				svg = vrvToolkit.renderData(data, {});
 				$("#svg_output").html(svg);
+				$('#page_number').html(currPage);
+				numPages = vrvToolkit.getPageCount();
 				let base64midi = vrvToolkit.renderToMIDI();
 				let binary = convertDataURIToBinary(base64midi);
 				song = new Midi(binary);
-				let offlineCtx = new OfflineAudioContext(2, 44100*song.duration, 44100);
-				setupOfflineCtx(offlineCtx);
-				song.tracks.forEach(t => {
-					let preset = t.instrument.percussion? player.loader.drumInfo(t.instrument.number) : player.loader.instrumentInfo(t.instrument.number);
-					console.log(preset)
-					player.loader.decodeAfterLoading(offlineCtx, preset.variable);
-				})
-				setTimeout(() => {
-					song.tracks.forEach(t => {
-						let channel = player.createChannel(offlineCtx);
-						console.log(channel)
-						channel.output.connect(reverberator.input);
-						let preset = t.instrument.percussion? player.loader.drumInfo(t.instrument.number) : player.loader.instrumentInfo(t.instrument.number);
-						t.notes.forEach(n => {
-							player.queueWaveTable(offlineCtx, channel.input, window[preset.variable], n.time, n.midi, n.duration, n.velocity);
-						})
-					})
-					offlineCtx.startRendering().then(buffer => {
-						renderedBuffer = buffer;
-						console.log(renderedBuffer)
-					})
-				}, 100)
+				loadAllFonts(audioContext, song.tracks);
+				setupEffects(audioContext);
 			}
 		});
 	</script>
